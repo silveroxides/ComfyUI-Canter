@@ -5,7 +5,9 @@ import math
 import torch
 import torch.nn.functional as F
 
-from .solver_core import Solver, solve
+import comfy.model_patcher
+
+from .solver_core import Solver, SolverProgressEvent, solve
 
 
 def _time(t, batch, device):
@@ -126,21 +128,36 @@ def sample_native(model, x, sigmas, extra_args=None, callback=None, disable=None
     del disable, kwargs
     extra_args = extra_args or {}
     x = x.float()
+    generator = torch.Generator(device=x.device).manual_seed(int(seed or 0))
+    schedule_steps = len(sigmas) - 1
 
     def velocity(state, time, schedule_index):
-        del schedule_index
-        denoised = model(state, time, **extra_args)
+        call_args = extra_args.copy()
+        model_options = comfy.model_patcher.create_model_options_clone(
+            call_args.get("model_options", {})
+        )
+        canter = model_options.setdefault("transformer_options", {}).setdefault(
+            "canter", {}
+        )
+        canter.update(
+            schedule_index=int(schedule_index),
+            schedule_steps=schedule_steps,
+            generator=generator,
+        )
+        call_args["model_options"] = model_options
+        denoised = model(state, time, **call_args)
         return (state - denoised) / time.view(-1, 1, 1, 1).clamp_min(1.0e-12)
 
-    def progress(completed, total):
+    def progress(event: SolverProgressEvent):
         if callback:
-            index = completed - 1
             callback({
-                "x": x, "i": index, "sigma": sigmas[index],
-                "sigma_hat": sigmas[index], "denoised": x,
+                "x": event.state,
+                "i": event.interval_index,
+                "sigma": event.time[0],
+                "sigma_hat": event.time[0],
+                "denoised": event.denoised,
             })
 
-    generator = torch.Generator(device=x.device).manual_seed(int(seed or 0))
     return solve(
         velocity, x, sigmas.float(), solver=Solver(solver),
         generator=generator,

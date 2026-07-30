@@ -95,6 +95,7 @@ class Encoder(nn.Module):
         mlp_type: str,
         bottleneck_posterior_kind: str,
         bottleneck_norm_mode: str,
+        operations,
     ) -> None:
         super().__init__()
         if int(model_dim) % int(_ENCODER_HEAD_DIM) != 0:
@@ -108,6 +109,7 @@ class Encoder(nn.Module):
             in_channels,
             patch_size,
             model_dim,
+            operations,
         )
         self.blocks = nn.ModuleList(
             [
@@ -120,6 +122,7 @@ class Encoder(nn.Module):
                     use_norms=True,
                     position_encoding=DiTPositionEncoding.ROPE_2D_AXIAL_UNNORMALIZED,
                     conditioning=DiTConditioning.UNCOND,
+                    operations=operations,
                 )
                 for index in range(int(depth))
             ]
@@ -149,14 +152,16 @@ class Encoder(nn.Module):
                 raise RuntimeError(
                     f"Unsupported bottleneck_posterior_kind: {unreachable}"
                 )
-        self.to_bottleneck = nn.Conv2d(
+        self.to_bottleneck = operations.Conv2d(
             int(model_dim),
             output_channels,
             kernel_size=1,
             bias=True,
         )
 
-    def _encode_projection(self, images: Tensor) -> Tensor:
+    def _encode_projection(
+        self, images: Tensor, transformer_options: dict | None = None
+    ) -> Tensor:
         """Encode images to the raw bottleneck projection."""
 
         z = self.patchify(images)
@@ -176,6 +181,7 @@ class Encoder(nn.Module):
                 adaln_m=None,
                 rope_sincos=rope_sincos,
                 generator=None,
+                transformer_options=transformer_options,
             )
         return self.to_bottleneck(y)
 
@@ -184,22 +190,26 @@ class Encoder(nn.Module):
 
         return z
 
-    def encode_posterior(self, images: Tensor) -> EncoderPosterior:
+    def encode_posterior(
+        self, images: Tensor, transformer_options: dict | None = None
+    ) -> EncoderPosterior:
         """Encode images and return the posterior."""
 
         if self.bottleneck_posterior_kind != "diagonal_gaussian":
             raise RuntimeError(
                 "encode_posterior requires bottleneck_posterior_kind=diagonal_gaussian"
             )
-        projection = self._encode_projection(images)
+        projection = self._encode_projection(images, transformer_options)
         mean, logsnr = projection.chunk(2, dim=1)
         mean = self._apply_bottleneck_norm(mean)
         return EncoderPosterior(mean=mean, logsnr=logsnr)
 
-    def forward(self, images: Tensor) -> Tensor:
+    def forward(
+        self, images: Tensor, transformer_options: dict | None = None
+    ) -> Tensor:
         """Encode images to latent tokens."""
 
-        projection = self._encode_projection(images)
+        projection = self._encode_projection(images, transformer_options)
         match self.bottleneck_posterior_kind:
             case "diagonal_gaussian":
                 mean, logsnr = projection.chunk(2, dim=1)

@@ -11,14 +11,16 @@ class AdaLNScaleGateZeroProjector(nn.Module):
     Outputs [B, 2*d_model] packed as (scale, gate).
     """
 
-    def __init__(self, d_model: int, d_cond: int) -> None:
+    def __init__(self, d_model: int, d_cond: int, operations) -> None:
         super().__init__()
         self.d_model: int = int(d_model)
         self.d_cond: int = int(d_cond)
         self.act: nn.SiLU = nn.SiLU()
-        self.proj: nn.Linear = nn.Linear(self.d_cond, 2 * self.d_model)
-        nn.init.zeros_(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
+        self.proj = operations.Linear(self.d_cond, 2 * self.d_model)
+        if self.proj.weight is not None:
+            nn.init.zeros_(self.proj.weight)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
 
     def project_activated(self, act_cond: Tensor) -> Tensor:
         """Return packed modulation for a pre-activated conditioning vector."""
@@ -52,15 +54,21 @@ class AdaLNScaleGateZeroLowRankDelta(nn.Module):
     Zero-initialized up projection preserves zero-output semantics at init.
     """
 
-    def __init__(self, *, d_model: int, d_cond: int, rank: int) -> None:
+    def __init__(
+        self, *, d_model: int, d_cond: int, rank: int, operations
+    ) -> None:
         super().__init__()
         self.d_model: int = int(d_model)
         self.d_cond: int = int(d_cond)
         self.rank: int = int(rank)
-        self.down: nn.Linear = nn.Linear(self.d_cond, self.rank, bias=False)
-        self.up: nn.Linear = nn.Linear(self.rank, 2 * self.d_model, bias=False)
-        nn.init.normal_(self.down.weight, mean=0.0, std=0.02)
-        nn.init.zeros_(self.up.weight)
+        self.down = operations.Linear(self.d_cond, self.rank, bias=False)
+        self.up = operations.Linear(
+            self.rank, 2 * self.d_model, bias=False
+        )
+        if self.down.weight is not None:
+            nn.init.normal_(self.down.weight, mean=0.0, std=0.02)
+        if self.up.weight is not None:
+            nn.init.zeros_(self.up.weight)
 
     def forward(self, act_cond: Tensor) -> Tensor:
         """Return packed delta modulation [B, 2*d_model]."""

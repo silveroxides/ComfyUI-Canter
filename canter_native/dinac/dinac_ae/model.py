@@ -7,6 +7,8 @@ from collections.abc import Callable
 import torch
 from torch import Tensor, nn
 
+import comfy.ops
+
 from ..dit.mlp_types import MLPType
 from ..dit.repa_projection import DinoTokenAlignmentHead
 
@@ -37,8 +39,10 @@ def _resolve_class_head_mlp_type(name: str) -> MLPType:
 class DinacAE(nn.Module):
     """Exported DINAC-AE wrapper with encode/decode/predict_class APIs."""
 
-    def __init__(self, config: DinacAEConfig) -> None:
+    def __init__(self, config: DinacAEConfig, operations=None) -> None:
         super().__init__()
+        if operations is None:
+            operations = comfy.ops.manual_cast
         self.config = config
         self.register_buffer(
             "latent_norm_running_mean",
@@ -58,6 +62,7 @@ class DinacAE(nn.Module):
             mlp_type=str(config.encoder_mlp_type),
             bottleneck_posterior_kind=str(config.bottleneck_posterior_kind),
             bottleneck_norm_mode=str(config.bottleneck_norm_mode),
+            operations=operations,
         )
         self.decoder = Decoder(
             in_channels=int(config.in_channels),
@@ -70,6 +75,7 @@ class DinacAE(nn.Module):
             mlp_ratio=float(config.mlp_ratio),
             depthwise_kernel_size=int(config.depthwise_kernel_size),
             adaln_low_rank_rank=int(config.adaln_low_rank_rank),
+            operations=operations,
         )
         self.dino_token_alignment_head = DinoTokenAlignmentHead(
             in_channels=int(config.bottleneck_dim),
@@ -160,7 +166,9 @@ class DinacAE(nn.Module):
         mean, std = self._latent_norm_stats()
         return z * std.to(device=z.device) + mean.to(device=z.device)
 
-    def encode(self, images: Tensor) -> Tensor:
+    def encode(
+        self, images: Tensor, transformer_options: dict | None = None
+    ) -> Tensor:
         """Encode images to the exported whitened latent space."""
 
         self._require_image_size_divisible(
@@ -174,10 +182,15 @@ class DinacAE(nn.Module):
             dtype=compute_dtype,
             enabled=compute_dtype is torch.bfloat16,
         ):
-            latents = self.encoder(images.to(device=device, dtype=compute_dtype))
+            latents = self.encoder(
+                images.to(device=device, dtype=compute_dtype),
+                transformer_options=transformer_options,
+            )
         return self.whiten(latents)
 
-    def encode_posterior(self, images: Tensor) -> EncoderPosterior:
+    def encode_posterior(
+        self, images: Tensor, transformer_options: dict | None = None
+    ) -> EncoderPosterior:
         """Encode images and return the raw posterior."""
 
         self._require_image_size_divisible(
@@ -192,7 +205,8 @@ class DinacAE(nn.Module):
             enabled=compute_dtype is torch.bfloat16,
         ):
             return self.encoder.encode_posterior(
-                images.to(device=device, dtype=compute_dtype)
+                images.to(device=device, dtype=compute_dtype),
+                transformer_options=transformer_options,
             )
 
     def predict_class(self, latents: Tensor) -> Tensor:

@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.amp import autocast
 
+import comfy.ops
+
 from .blocks import (
     DiTBlock,
     ImageTextCrossAttention,
@@ -62,17 +64,20 @@ class _ImageState:
     time: Tensor
     height: int
     width: int
+    transformer_options: dict
 
 
 class TimeEmbedding(nn.Module):
     """Float32 sinusoidal embedding followed by the learned two-layer MLP."""
 
-    def __init__(self, width: int, frequency_width: int, scale: float) -> None:
+    def __init__(
+        self, width: int, frequency_width: int, scale: float, operations
+    ) -> None:
         super().__init__()
         self.frequency_width = int(frequency_width)
         self.scale = float(scale)
-        self.proj_in = nn.Linear(self.frequency_width, width, bias=True)
-        self.proj_out = nn.Linear(width, width, bias=True)
+        self.proj_in = operations.Linear(self.frequency_width, width, bias=True)
+        self.proj_out = operations.Linear(width, width, bias=True)
 
     def forward(self, time: Tensor) -> Tensor:
         """Embed a batch of continuous flow times."""
@@ -92,10 +97,10 @@ class TimeEmbedding(nn.Module):
 class InputPositionProjection(nn.Module):
     """FP32 projection of fixed normalized 2D sin/cos features."""
 
-    def __init__(self, width: int) -> None:
+    def __init__(self, width: int, operations) -> None:
         super().__init__()
         self.width = int(width)
-        self.proj = nn.Linear(width, width, bias=False)
+        self.proj = operations.Linear(width, width, bias=False)
 
     def _apply(
         self,
@@ -126,43 +131,37 @@ class InputPositionProjection(nn.Module):
             device,
         )
         with autocast(device_type=device.type, enabled=False):
-            projected = F.linear(features, self.proj.weight.float())
+            projected = self.proj(features.float())
         return projected.to(dtype=dtype).unsqueeze(0).expand(batch, -1, -1)
 
 
-class Float32Linear(nn.Linear):
-    """Linear layer whose parameters remain FP32 across module dtype moves."""
+def float32_linear(operations, in_features: int, out_features: int, *, bias: bool):
+    """Construct a Core-stageable linear operation with an FP32 compute boundary."""
 
-    def _apply(
-        self,
-        fn: Callable[[Tensor], Tensor],
-        recurse: bool = True,
-    ) -> Float32Linear:
-        """Apply device moves while retaining unrounded FP32 parameters."""
+    class Float32Linear(operations.Linear):
+        def forward(self, input: Tensor) -> Tensor:
+            with autocast(device_type=input.device.type, enabled=False):
+                return super().forward(input.float()).float()
 
-        weight = self.weight.detach().float()
-        bias = None if self.bias is None else self.bias.detach().float()
-        super()._apply(fn, recurse=recurse)
-        self.weight.data = weight.to(device=self.weight.device)
-        if self.bias is not None and bias is not None:
-            self.bias.data = bias.to(device=self.bias.device)
-        return self
+    return Float32Linear(in_features, out_features, bias=bias)
 
 
 class ImageLayer(nn.Module):
     """One regular functional image layer and its AdaLN delta."""
 
-    def __init__(self, config: CanterConfig) -> None:
+    def __init__(self, config: CanterConfig, operations) -> None:
         super().__init__()
         self.dit_block = DiTBlock(
             config.width,
             config.image_heads,
             config.mlp_ratio,
+            operations,
         )
         self.dit_delta = LowRankAdaLN(
             config.width,
             4 * config.width,
             config.adaln_rank,
+            operations,
         )
 
     def forward(  # noqa: PLR0917 - frozen image-layer tensor interface
@@ -173,6 +172,7 @@ class ImageLayer(nn.Module):
         image_adaln: SharedAdaLN,
         rope: tuple[Tensor, Tensor],
         generator: torch.Generator | None,
+        transformer_options: dict,
     ) -> Tensor:
         """Apply the functional image layer."""
 
@@ -185,6 +185,7 @@ class ImageLayer(nn.Module):
             modulation,
             rope_sincos=rope,
             generator=generator,
+            transformer_options=transformer_options,
         )
 
     def compile_for_inference(self, *, fullgraph: bool, dynamic: bool) -> None:
@@ -196,17 +197,21 @@ class ImageLayer(nn.Module):
 class BoundaryImageLayer(nn.Module):
     """Always-on text-conditioned prefix or suffix boundary layer."""
 
-    def __init__(self, config: CanterConfig, backend: TextAttentionBackend) -> None:
+    def __init__(
+        self, config: CanterConfig, backend: TextAttentionBackend, operations
+    ) -> None:
         super().__init__()
         self.dit_block = TransitionDiTBlock(
             config.width,
             config.image_heads,
             config.mlp_ratio,
+            operations,
         )
         self.dit_delta = LowRankAdaLN(
             config.width,
             4 * config.width,
             config.adaln_rank,
+            operations,
         )
         self.cross_modulation_scale = nn.Parameter(torch.zeros(()))
         self.cross_attention = ImageTextCrossAttention(
@@ -215,11 +220,13 @@ class BoundaryImageLayer(nn.Module):
             config.cross_heads,
             config.cross_head_dim,
             backend,
+            operations,
         )
         self.cross_delta = LowRankAdaLN(
             config.width,
             2 * config.width,
             config.adaln_rank,
+            operations,
         )
 
     def _apply(
@@ -246,6 +253,7 @@ class BoundaryImageLayer(nn.Module):
         cross_adaln: SharedAdaLN,
         rope: tuple[Tensor, Tensor],
         generator: torch.Generator | None,
+        transformer_options: dict,
     ) -> Tensor:
         """Apply cross-attention followed by the transition DiT block."""
 
@@ -264,6 +272,7 @@ class BoundaryImageLayer(nn.Module):
             text.min_length,
             text.max_length,
             cross_modulation,
+            transformer_options,
         )
         dit_modulation = project_adaln(
             image_adaln,
@@ -278,6 +287,7 @@ class BoundaryImageLayer(nn.Module):
             dit_modulation,
             rope_sincos=rope,
             generator=generator,
+            transformer_options=transformer_options,
         )
 
     def select_text_backend(self, backend: TextAttentionBackend) -> None:
@@ -301,7 +311,9 @@ class BoundaryImageLayer(nn.Module):
 class MiddleImageLayer(nn.Module):
     """One text-conditioned SPRINT-routable middle layer."""
 
-    def __init__(self, config: CanterConfig, backend: TextAttentionBackend) -> None:
+    def __init__(
+        self, config: CanterConfig, backend: TextAttentionBackend, operations
+    ) -> None:
         super().__init__()
         self.cross_attention = ImageTextCrossAttention(
             config.width,
@@ -309,21 +321,25 @@ class MiddleImageLayer(nn.Module):
             config.cross_heads,
             config.cross_head_dim,
             backend,
+            operations,
         )
         self.cross_delta = LowRankAdaLN(
             config.width,
             2 * config.width,
             config.adaln_rank,
+            operations,
         )
         self.dit_block = DiTBlock(
             config.width,
             config.image_heads,
             config.mlp_ratio,
+            operations,
         )
         self.dit_delta = LowRankAdaLN(
             config.width,
             4 * config.width,
             config.adaln_rank,
+            operations,
         )
 
     def forward(  # noqa: PLR0917 - frozen middle-layer tensor interface
@@ -336,6 +352,7 @@ class MiddleImageLayer(nn.Module):
         cross_adaln: SharedAdaLN,
         rope: tuple[Tensor, Tensor],
         generator: torch.Generator | None,
+        transformer_options: dict,
     ) -> Tensor:
         """Apply cross-attention and the corresponding image block."""
 
@@ -351,6 +368,7 @@ class MiddleImageLayer(nn.Module):
             text.min_length,
             text.max_length,
             cross_modulation,
+            transformer_options,
         )
         dit_modulation = project_adaln(
             image_adaln,
@@ -365,6 +383,7 @@ class MiddleImageLayer(nn.Module):
             dit_modulation,
             rope_sincos=rope,
             generator=generator,
+            transformer_options=transformer_options,
         )
 
     def select_text_backend(self, backend: TextAttentionBackend) -> None:
@@ -565,43 +584,56 @@ class CanterModel(nn.Module):
     def __init__(
         self,
         text_backend: TextAttentionBackend = TextAttentionBackend.JAGGED,
+        operations=None,
     ) -> None:
         super().__init__()
+        if operations is None:
+            operations = comfy.ops.manual_cast
         config = CANTER_CONFIG
         self.config = config
-        self.input_projection = nn.Linear(
+        self.input_projection = operations.Linear(
             config.latent_channels,
             config.width,
             bias=True,
         )
-        self.input_position = InputPositionProjection(config.width)
+        self.input_position = InputPositionProjection(config.width, operations)
         self.time_embedding = TimeEmbedding(
             config.width,
             config.time_frequency_width,
             config.time_scale,
+            operations,
         )
-        self.image_adaln = SharedAdaLN(config.width, 4 * config.width)
-        self.cross_adaln = SharedAdaLN(config.width, 2 * config.width)
+        self.image_adaln = SharedAdaLN(
+            config.width, 4 * config.width, operations
+        )
+        self.cross_adaln = SharedAdaLN(
+            config.width, 2 * config.width, operations
+        )
         self.prefix_layers = nn.ModuleList(
             (
-                ImageLayer(config),
-                ImageLayer(config),
-                BoundaryImageLayer(config, text_backend),
+                ImageLayer(config, operations),
+                ImageLayer(config, operations),
+                BoundaryImageLayer(config, text_backend, operations),
             )
         )
         self.middle_layers = nn.ModuleList(
-            MiddleImageLayer(config, text_backend) for _ in range(config.middle_depth)
+            MiddleImageLayer(config, text_backend, operations)
+            for _ in range(config.middle_depth)
         )
         self.suffix_layers = nn.ModuleList(
             (
-                BoundaryImageLayer(config, text_backend),
-                ImageLayer(config),
-                ImageLayer(config),
+                BoundaryImageLayer(config, text_backend, operations),
+                ImageLayer(config, operations),
+                ImageLayer(config, operations),
             )
         )
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config.width))
-        self.fusion = nn.Linear(2 * config.width, config.width, bias=True)
-        self.tail_scale = nn.Linear(config.width, 2 * config.width, bias=True)
+        self.fusion = operations.Linear(
+            2 * config.width, config.width, bias=True
+        )
+        self.tail_scale = operations.Linear(
+            config.width, 2 * config.width, bias=True
+        )
         self.text_blocks = nn.ModuleList(
             TextTransformerBlock(
                 config.text_width,
@@ -609,26 +641,28 @@ class CanterModel(nn.Module):
                 config.mlp_ratio,
                 config.text_rope_theta,
                 text_backend,
+                operations,
             )
             for _ in range(config.text_refine_depth)
         )
-        self.output_projection = Float32Linear(
+        self.output_projection = float32_linear(
+            operations,
             config.width,
             config.latent_channels,
             bias=True,
         )
         self.unconditional_token = nn.Parameter(torch.zeros(1, config.text_width))
-        self.text_projection_low = nn.Linear(
+        self.text_projection_low = operations.Linear(
             config.text_backbone_width,
             config.text_width,
             bias=False,
         )
-        self.text_projection_middle = nn.Linear(
+        self.text_projection_middle = operations.Linear(
             config.text_backbone_width,
             config.text_width,
             bias=False,
         )
-        self.text_projection_high = nn.Linear(
+        self.text_projection_high = operations.Linear(
             config.text_backbone_width,
             config.text_width,
             bias=False,
@@ -808,6 +842,7 @@ class CanterModel(nn.Module):
         path: CanterPath = CanterPath.FULL,
         self_attention_gain: float = 0.0,
         generator: torch.Generator | None = None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Dispatch to one of the three concrete model paths."""
         try:
@@ -819,6 +854,7 @@ class CanterModel(nn.Module):
                         text,
                         self_attention_gain=self_attention_gain,
                         generator=generator,
+                        transformer_options=transformer_options,
                     )
                 case CanterPath.THREE_QUARTER:
                     if generator is None:
@@ -831,6 +867,7 @@ class CanterModel(nn.Module):
                         text,
                         generator=generator,
                         self_attention_gain=self_attention_gain,
+                        transformer_options=transformer_options,
                     )
                 case CanterPath.SKIP_MIDDLE:
                     return self.forward_skip_middle(
@@ -839,6 +876,7 @@ class CanterModel(nn.Module):
                         text,
                         self_attention_gain=self_attention_gain,
                         generator=generator,
+                        transformer_options=transformer_options,
                     )
                 case _ as unreachable:
                     raise RuntimeError(f"Unsupported Canter path: {unreachable}")
@@ -853,11 +891,12 @@ class CanterModel(nn.Module):
         *,
         self_attention_gain: float = 0.0,
         generator: torch.Generator | None = None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Predict velocity with all 24 middle layers and all image tokens."""
 
         self._set_image_attention_gain(self_attention_gain)
-        state = self._prepare_image(latents, time)
+        state = self._prepare_image(latents, time, transformer_options)
         prefix = self._run_prefix(state.tokens, state, text, generator)
         middle = self._run_middle(prefix, state, text, state.rope, generator)
         return self._finish(prefix, middle, state, text, generator)
@@ -870,11 +909,12 @@ class CanterModel(nn.Module):
         *,
         generator: torch.Generator,
         self_attention_gain: float = 0.0,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Predict velocity with one image token per 2x2 SPRINT cell."""
 
         self._set_image_attention_gain(self_attention_gain)
-        state = self._prepare_image(latents, time)
+        state = self._prepare_image(latents, time, transformer_options)
         prefix = self._run_prefix(state.tokens, state, text, generator)
         keep = sample_three_quarter_indices(
             prefix.shape[0],
@@ -899,11 +939,12 @@ class CanterModel(nn.Module):
         *,
         self_attention_gain: float = 0.0,
         generator: torch.Generator | None = None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Predict velocity while replacing the complete middle path by masks."""
 
         self._set_image_attention_gain(self_attention_gain)
-        state = self._prepare_image(latents, time)
+        state = self._prepare_image(latents, time, transformer_options)
         prefix = self._run_prefix(state.tokens, state, text, generator)
         masked = self.mask_token.to(dtype=prefix.dtype).expand_as(prefix)
         return self._finish(prefix, masked, state, text, generator)
@@ -940,6 +981,7 @@ class CanterModel(nn.Module):
         self,
         latents: Tensor,
         time: Tensor,
+        transformer_options: dict | None,
     ) -> _ImageState:
         """Project latents and construct shared time and position values."""
 
@@ -977,6 +1019,7 @@ class CanterModel(nn.Module):
             time=time,
             height=height,
             width=width,
+            transformer_options=transformer_options or {},
         )
 
     def _run_prefix(
@@ -998,6 +1041,7 @@ class CanterModel(nn.Module):
             self.image_adaln,
             state.rope,
             generator,
+            state.transformer_options,
         )
         tokens = second(
             tokens,
@@ -1006,6 +1050,7 @@ class CanterModel(nn.Module):
             self.image_adaln,
             state.rope,
             generator,
+            state.transformer_options,
         )
         return boundary(
             tokens,
@@ -1016,6 +1061,7 @@ class CanterModel(nn.Module):
             self.cross_adaln,
             state.rope,
             generator,
+            state.transformer_options,
         )
 
     def _run_middle(
@@ -1039,6 +1085,7 @@ class CanterModel(nn.Module):
                 self.cross_adaln,
                 rope,
                 generator,
+                state.transformer_options,
             )
         return tokens
 
@@ -1065,6 +1112,7 @@ class CanterModel(nn.Module):
             self.cross_adaln,
             state.rope,
             generator,
+            state.transformer_options,
         )
         tokens = second(
             tokens,
@@ -1073,6 +1121,7 @@ class CanterModel(nn.Module):
             self.image_adaln,
             state.rope,
             generator,
+            state.transformer_options,
         )
         tokens = third(
             tokens,
@@ -1081,6 +1130,7 @@ class CanterModel(nn.Module):
             self.image_adaln,
             state.rope,
             generator,
+            state.transformer_options,
         )
         return self._decode(tokens, state)
 
@@ -1120,11 +1170,7 @@ class CanterModel(nn.Module):
         """Return float32 latent velocity."""
 
         with autocast(device_type=tokens.device.type, enabled=False):
-            residual = F.linear(
-                tokens.float(),
-                self.output_projection.weight.float(),
-                self.output_projection.bias.float(),
-            )
+            residual = self.output_projection(tokens.float())
             residual = residual.transpose(1, 2).reshape(
                 tokens.shape[0],
                 self.config.latent_channels,

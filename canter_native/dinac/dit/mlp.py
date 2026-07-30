@@ -43,23 +43,30 @@ class SimpleActivationMLP(nn.Module):
         activation_name: str,
         bias_up: bool,
         bias_down: bool,
+        operations,
     ) -> None:
         super().__init__()
         self.in_features = int(in_features)
         self.hidden_features = int(hidden_features)
         self.activation = activation
         self.activation_name = str(activation_name)
-        self.up = nn.Linear(self.in_features, self.hidden_features, bias=bias_up)
-        self.down = nn.Linear(self.hidden_features, self.in_features, bias=bias_down)
+        self.up = operations.Linear(
+            self.in_features, self.hidden_features, bias=bias_up
+        )
+        self.down = operations.Linear(
+            self.hidden_features, self.in_features, bias=bias_down
+        )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        """Reset linear projections."""
+        """Reset projections that ComfyUI has materialized."""
 
-        nn.init.xavier_uniform_(self.up.weight)
+        if self.up.weight is not None:
+            nn.init.xavier_uniform_(self.up.weight)
         if self.up.bias is not None:
             nn.init.zeros_(self.up.bias)
-        nn.init.xavier_uniform_(self.down.weight)
+        if self.down.weight is not None:
+            nn.init.xavier_uniform_(self.down.weight)
         if self.down.bias is not None:
             nn.init.zeros_(self.down.bias)
 
@@ -78,10 +85,15 @@ def build_dit_mlp(
     block_index: int = 0,
     bias_up: bool = False,
     bias_down: bool = False,
+    operations=None,
 ) -> nn.Module:
     """Build the exported MLP variant."""
 
     _ = activation_config, block_index
+    if operations is None:
+        import comfy.ops
+
+        operations = comfy.ops.manual_cast
     match mlp_type:
         case MLPType.GELU:
             return SimpleActivationMLP(
@@ -91,6 +103,7 @@ def build_dit_mlp(
                 activation_name="gelu",
                 bias_up=bool(bias_up),
                 bias_down=bool(bias_down),
+                operations=operations,
             )
         case MLPType.SILU:
             return SimpleActivationMLP(
@@ -100,6 +113,7 @@ def build_dit_mlp(
                 activation_name="silu",
                 bias_up=bool(bias_up),
                 bias_down=bool(bias_down),
+                operations=operations,
             )
         case MLPType.RELU:
             return SimpleActivationMLP(
@@ -109,6 +123,7 @@ def build_dit_mlp(
                 activation_name="relu",
                 bias_up=bool(bias_up),
                 bias_down=bool(bias_down),
+                operations=operations,
             )
         case _ as unreachable:
             raise ValueError(f"Unsupported exported MLP type: {unreachable}")

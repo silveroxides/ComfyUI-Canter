@@ -1,4 +1,5 @@
 tests/
+tools/
 .pytest-tmp/
 __pycache__/
 *.pyc

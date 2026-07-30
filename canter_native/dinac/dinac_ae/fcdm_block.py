@@ -46,12 +46,17 @@ class FCDMBlock(nn.Module):
         use_external_adaln: bool = False,
         norm_eps: float = 1e-6,
         layer_scale_init: float = 1e-3,
+        operations=None,
     ) -> None:
         super().__init__()
+        if operations is None:
+            import comfy.ops
+
+            operations = comfy.ops.manual_cast
         self.channels: int = int(channels)
         self.mlp_ratio: float = float(mlp_ratio)
 
-        self.dwconv = nn.Conv2d(
+        self.dwconv = operations.Conv2d(
             channels,
             channels,
             kernel_size=depthwise_kernel_size,
@@ -62,9 +67,13 @@ class FCDMBlock(nn.Module):
         )
         self.norm = ChannelWiseRMSNorm(channels, eps=float(norm_eps), affine=False)
         hidden = max(int(float(channels) * float(mlp_ratio)), 1)
-        self.pwconv1 = nn.Conv2d(channels, hidden, kernel_size=1, bias=True)
+        self.pwconv1 = operations.Conv2d(
+            channels, hidden, kernel_size=1, bias=True
+        )
         self.grn = GRN(hidden, eps=1e-6)
-        self.pwconv2 = nn.Conv2d(hidden, channels, kernel_size=1, bias=True)
+        self.pwconv2 = operations.Conv2d(
+            hidden, channels, kernel_size=1, bias=True
+        )
 
         if not use_external_adaln:
             self.layer_scale = nn.Parameter(

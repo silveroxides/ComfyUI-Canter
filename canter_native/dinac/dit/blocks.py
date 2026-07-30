@@ -58,8 +58,13 @@ class TransformerBlock(nn.Module):
         position_encoding: DiTPositionEncoding = DiTPositionEncoding.NONE,
         rope_theta: float | None = None,
         rope_max_position_embeddings: int | None = None,
+        operations=None,
     ) -> None:
         super().__init__()
+        if operations is None:
+            import comfy.ops
+
+            operations = comfy.ops.manual_cast
         self.d_model = int(d_model)
         self.n_heads = int(n_heads)
         self.attn_norm = RMSNorm(self.d_model) if bool(use_norms) else None
@@ -68,6 +73,7 @@ class TransformerBlock(nn.Module):
             d_model=self.d_model,
             n_heads=self.n_heads,
             position_encoding=position_encoding,
+            operations=operations,
         )
         self.rope_1d = self._build_rope_1d(
             position_encoding=position_encoding,
@@ -82,6 +88,7 @@ class TransformerBlock(nn.Module):
             block_index=int(block_index),
             bias_up=False,
             bias_down=False,
+            operations=operations,
         )
 
     def reset_parameters(self) -> None:
@@ -177,8 +184,13 @@ class DitBlock(nn.Module):
         use_norms: bool = True,
         position_encoding: DiTPositionEncoding = DiTPositionEncoding.NONE,
         conditioning: DiTConditioning = DiTConditioning.UNCOND,
+        operations=None,
     ) -> None:
         super().__init__()
+        if operations is None:
+            import comfy.ops
+
+            operations = comfy.ops.manual_cast
         if conditioning is not DiTConditioning.UNCOND or adaln is not None:
             raise ValueError("DINAC-AE export only supports unconditional DitBlock")
         self.d = int(d_model)
@@ -199,6 +211,7 @@ class DitBlock(nn.Module):
             d_model=self.d,
             n_heads=self.h,
             position_encoding=position_encoding,
+            operations=operations,
         )
         self.qkv = self.attn_core.qkv
         self.proj_out = self.attn_core.proj_out
@@ -210,6 +223,7 @@ class DitBlock(nn.Module):
             block_index=int(block_index),
             bias_up=False,
             bias_down=False,
+            operations=operations,
         )
         self.reset_parameters()
 
@@ -238,13 +252,18 @@ class DitBlock(nn.Module):
         *,
         rope_sincos: tuple[Tensor, Tensor] | None = None,
         generator: torch.Generator | None = None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Apply the dense unconditional block to spatial features or tokens."""
 
         _ = cond_vec, adaln_m, generator
         tokens, hw_tokens, was_spatial = _flatten_tokens(x, hw)
         attn_in = self.attn_norm1(tokens) if self.use_norms else tokens
-        y = self.attn_core(attn_in, rope_sincos=rope_sincos)
+        y = self.attn_core(
+            attn_in,
+            rope_sincos=rope_sincos,
+            transformer_options=transformer_options,
+        )
         attn_out = self.attn_norm2(y) if self.use_norms else y
         tokens = tokens + attn_out
         mlp_in = self.mlp_norm1(tokens) if self.use_norms else tokens

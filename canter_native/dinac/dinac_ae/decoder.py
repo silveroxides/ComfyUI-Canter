@@ -36,6 +36,7 @@ class Decoder(nn.Module):
         mlp_ratio: float,
         depthwise_kernel_size: int,
         adaln_low_rank_rank: int,
+        operations,
     ) -> None:
         super().__init__()
         self.patch_size = int(patch_size)
@@ -45,22 +46,30 @@ class Decoder(nn.Module):
             in_channels,
             patch_size,
             model_dim,
+            operations,
         )
 
-        self.latent_up = nn.Conv2d(bottleneck_dim, model_dim, kernel_size=1, bias=True)
-        self.fuse_in = nn.Conv2d(2 * model_dim, model_dim, kernel_size=1, bias=True)
+        self.latent_up = operations.Conv2d(
+            bottleneck_dim, model_dim, kernel_size=1, bias=True
+        )
+        self.fuse_in = operations.Conv2d(
+            2 * model_dim, model_dim, kernel_size=1, bias=True
+        )
 
         # Time embedding
-        self.time_embed = SinusoidalTimeEmbeddingMLP(model_dim)
+        self.time_embed = SinusoidalTimeEmbeddingMLP(
+            model_dim, operations=operations
+        )
 
         # 2-way AdaLN: shared base projector + per-block low-rank deltas
         self.adaln_base = AdaLNScaleGateZeroProjector(
-            d_model=model_dim, d_cond=model_dim
+            d_model=model_dim, d_cond=model_dim, operations=operations
         )
         self.adaln_deltas = nn.ModuleList(
             [
                 AdaLNScaleGateZeroLowRankDelta(
-                    d_model=model_dim, d_cond=model_dim, rank=adaln_low_rank_rank
+                    d_model=model_dim, d_cond=model_dim,
+                    rank=adaln_low_rank_rank, operations=operations,
                 )
                 for _ in range(depth)
             ]
@@ -79,6 +88,7 @@ class Decoder(nn.Module):
                         mlp_ratio,
                         depthwise_kernel_size=depthwise_kernel_size,
                         use_external_adaln=True,
+                        operations=operations,
                     )
                     for _ in range(count)
                 ]
@@ -86,12 +96,14 @@ class Decoder(nn.Module):
 
         self.start_blocks = _make_blocks(start_block_count)
         self.middle_blocks = _make_blocks(middle_count)
-        self.fuse_skip = nn.Conv2d(2 * model_dim, model_dim, kernel_size=1, bias=True)
+        self.fuse_skip = operations.Conv2d(
+            2 * model_dim, model_dim, kernel_size=1, bias=True
+        )
         self.end_blocks = _make_blocks(end_block_count)
 
         self.path_drop_mask_feature = nn.Parameter(torch.zeros((1, model_dim, 1, 1)))
 
-        self.out_proj = nn.Conv2d(
+        self.out_proj = operations.Conv2d(
             model_dim, in_channels * (patch_size**2), kernel_size=1, bias=True
         )
         self.unpatchify = nn.PixelShuffle(patch_size)

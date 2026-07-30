@@ -56,6 +56,7 @@ class DitSelfAttentionCore(nn.Module):
         n_heads: int,
         *,
         position_encoding: DiTPositionEncoding,
+        operations,
     ) -> None:
         super().__init__()
         if d_model % n_heads != 0:
@@ -64,19 +65,27 @@ class DitSelfAttentionCore(nn.Module):
         self.n_heads = int(n_heads)
         self.head_dim = int(self.d_model // self.n_heads)
         self.position_encoding = position_encoding
-        self.qkv = nn.Linear(self.d_model, 3 * self.d_model, bias=False)
-        self.proj_out = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.qkv = operations.Linear(self.d_model, 3 * self.d_model, bias=False)
+        self.proj_out = operations.Linear(
+            self.d_model, self.d_model, bias=False
+        )
         self.q_norm = RMSNorm(self.head_dim)
         self.k_norm = RMSNorm(self.head_dim)
 
     def reset_parameters(self) -> None:
         """Reset projections to their initialization."""
 
-        nn.init.xavier_uniform_(self.qkv.weight)
-        nn.init.xavier_uniform_(self.proj_out.weight)
+        if self.qkv.weight is not None:
+            nn.init.xavier_uniform_(self.qkv.weight)
+        if self.proj_out.weight is not None:
+            nn.init.xavier_uniform_(self.proj_out.weight)
 
     def forward(
-        self, tokens: Tensor, *, rope_sincos: tuple[Tensor, Tensor] | None
+        self,
+        tokens: Tensor,
+        *,
+        rope_sincos: tuple[Tensor, Tensor] | None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Apply dense self-attention to ``[B, N, D]`` tokens."""
 
@@ -90,7 +99,8 @@ class DitSelfAttentionCore(nn.Module):
         k = self.k_norm(k.contiguous())
         q, k = self._apply_axial_rope_dense(q, k, rope_sincos=rope_sincos)
         attn = optimized_attention(
-            q, k, v, self.n_heads, skip_reshape=True, skip_output_reshape=True
+            q, k, v, self.n_heads, skip_reshape=True, skip_output_reshape=True,
+            transformer_options=transformer_options or {},
         )
         attn = (
             attn.transpose(1, 2).contiguous().view(batch, sequence_length, self.d_model)
@@ -162,6 +172,7 @@ class CrossAttentionCore(nn.Module):
         context_extra_dim: int = 0,
         key_extra_dim: int = 0,
         attn_dropout: float = 0.0,
+        operations=None,
     ) -> None:
         super().__init__()
         self.query_dim = int(query_dim)
@@ -173,22 +184,34 @@ class CrossAttentionCore(nn.Module):
         self.attn_dim = int(self.n_heads * self.head_dim)
         self.context_in_dim = int(self.context_dim + self.context_extra_dim)
         self.attn_dropout = float(attn_dropout)
-        self.kv_proj = nn.Linear(self.context_in_dim, 2 * self.attn_dim, bias=False)
+        if operations is None:
+            import comfy.ops
+
+            operations = comfy.ops.manual_cast
+        self.kv_proj = operations.Linear(
+            self.context_in_dim, 2 * self.attn_dim, bias=False
+        )
         if self.key_extra_dim == 0:
             self.k_extra_proj = None
         else:
-            self.k_extra_proj = nn.Linear(self.key_extra_dim, self.attn_dim, bias=False)
-        self.out_proj = nn.Linear(self.attn_dim, self.query_dim, bias=False)
+            self.k_extra_proj = operations.Linear(
+                self.key_extra_dim, self.attn_dim, bias=False
+            )
+        self.out_proj = operations.Linear(
+            self.attn_dim, self.query_dim, bias=False
+        )
         self.q_norm_heads = RMSNorm(self.head_dim)
         self.k_norm_heads = RMSNorm(self.head_dim)
 
     def reset_parameters(self) -> None:
         """Reset projections to their initialization."""
 
-        nn.init.xavier_uniform_(self.kv_proj.weight)
-        if self.k_extra_proj is not None:
+        if self.kv_proj.weight is not None:
+            nn.init.xavier_uniform_(self.kv_proj.weight)
+        if self.k_extra_proj is not None and self.k_extra_proj.weight is not None:
             nn.init.xavier_uniform_(self.k_extra_proj.weight)
-        nn.init.xavier_uniform_(self.out_proj.weight)
+        if self.out_proj.weight is not None:
+            nn.init.xavier_uniform_(self.out_proj.weight)
 
     def _split_heads(self, x: Tensor) -> Tensor:
         batch, sequence_length, _width = x.shape
@@ -210,6 +233,7 @@ class CrossAttentionCore(nn.Module):
         training: bool,
         key_extra: Tensor | None = None,
         key_padding_mask: Tensor | None = None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Apply dense cross-attention to query and context tokens."""
 
@@ -231,6 +255,7 @@ class CrossAttentionCore(nn.Module):
         attn = optimized_attention(
             q, k, v, self.n_heads, mask=attn_mask,
             skip_reshape=True, skip_output_reshape=True,
+            transformer_options=transformer_options or {},
         )
         return self.out_proj(self._merge_heads(attn))
 

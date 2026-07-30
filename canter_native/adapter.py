@@ -82,7 +82,11 @@ class CanterModelAdapter(comfy.model_base.BaseModel):
         path = CanterPath(options.get("path", "full"))
         generator = None
         if path is CanterPath.THREE_QUARTER:
-            generator = torch.Generator(device=x.device).manual_seed(int(options.get("seed", 0)))
+            generator = options.get("generator")
+            if not isinstance(generator, torch.Generator):
+                raise RuntimeError(
+                    "Three-quarter SPRINT requires the run-scoped Canter generator"
+                )
         compute_dtype = self.get_dtype()
         with torch.autocast(
             device_type=x.device.type,
@@ -93,6 +97,7 @@ class CanterModelAdapter(comfy.model_base.BaseModel):
                 x, sigma.float(), text, path=path,
                 self_attention_gain=float(options.get("self_attention_gain", 0.0)),
                 generator=generator,
+                transformer_options=transformer_options or {},
             )
         return self.model_sampling.calculate_denoised(sigma, velocity.float(), x)
 

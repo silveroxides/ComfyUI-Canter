@@ -1,0 +1,117 @@
+{
+  "1": {
+    "class_type": "CanterModelLoader",
+    "inputs": {
+      "diffusion_model": "canter_v0001.safetensors",
+      "text_encoder": "canter_smol_lm2_360m.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "A quiet sunlit room with plants and handmade furniture.",
+      "clip": ["1", 1]
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["1", 1]
+    }
+  },
+  "4": {
+    "class_type": "CanterGuider",
+    "inputs": {
+      "cfg_enabled": false,
+      "cfg_scale": 1.0,
+      "cfg_start": 0,
+      "cfg_stop": -1,
+      "pdg_mode": "full",
+      "pdg_curve": "constant",
+      "pdg_noisy": 2.5,
+      "pdg_clean": 2.5,
+      "pdg_power": 3.0,
+      "pdg_start": 0,
+      "pdg_stop": -1,
+      "self_attention_gain": -0.03,
+      "model": ["1", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0]
+    }
+  },
+  "5": {
+    "class_type": "CanterSamplerScheduler",
+    "inputs": {
+      "solver": "abm2",
+      "schedule": "beta",
+      "steps": 50,
+      "log_snr_shift": 0.0,
+      "euler_maruyama_multiplier": 1.0,
+      "er_sde_noise_multiplier": 1.0
+    }
+  },
+  "6": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 42
+    }
+  },
+  "7": {
+    "class_type": "EmptyCanterLatent",
+    "inputs": {
+      "width": 832,
+      "height": 1216,
+      "batch_size": 1
+    }
+  },
+  "8": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": ["6", 0],
+      "guider": ["4", 0],
+      "sampler": ["5", 0],
+      "sigmas": ["5", 1],
+      "latent_image": ["7", 0]
+    }
+  },
+  "9": {
+    "class_type": "CanterVAELoader",
+    "inputs": {
+      "vae_name": "dinac_ae_d2.safetensors"
+    }
+  },
+  "10": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["8", 0],
+      "vae": ["9", 0]
+    }
+  },
+  "11": {
+    "class_type": "CanterVAEDecodeAdvanced",
+    "inputs": {
+      "seed": 0,
+      "steps": 1,
+      "sampler": "ddim",
+      "schedule": "linear",
+      "pdg_enabled": false,
+      "pdg_strength": 2.0,
+      "strength": 1.0,
+      "vae": ["9", 0],
+      "samples": ["8", 0]
+    }
+  },
+  "12": {
+    "class_type": "PreviewImage",
+    "inputs": {
+      "images": ["10", 0]
+    }
+  },
+  "13": {
+    "class_type": "PreviewImage",
+    "inputs": {
+      "images": ["11", 0]
+    }
+  }
+}

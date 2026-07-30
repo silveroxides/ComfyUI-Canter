@@ -50,20 +50,38 @@ class CanterVAE:
 
     def encode(self, pixels):
         mm.load_models_gpu([self.patcher])
-        pixels = pixels.movedim(-1, 1)
+        pixels = pixels.movedim(-1, 1).mul(2.0).sub(1.0)
         pixels = pixels.to(self.patcher.load_device)
-        return self.first_stage_model.encode(pixels).float()
+        return self.first_stage_model.encode(
+            pixels,
+            transformer_options=self.patcher.model_options.get(
+                "transformer_options", {}
+            ),
+        ).float()
 
-    def _decode(self, samples, *, seed, steps, sampler, schedule, pdg_scale, strength=1.0):
+    def _decode(
+        self,
+        samples,
+        *,
+        seed,
+        steps,
+        sampler,
+        schedule,
+        pdg_enabled,
+        pdg_strength,
+        strength=1.0,
+    ):
         mm.load_models_gpu([self.patcher])
         samples = samples.to(self.patcher.load_device)
+        if not 0.0 < float(strength) <= 1.0:
+            raise ValueError("DINAC decoder strength must lie in (0, 1]")
         height, width = int(samples.shape[-2]) * 16, int(samples.shape[-1]) * 16
         inference = DinacAEInferenceConfig(
             num_steps=int(steps),
             sampler=sampler,
             schedule=schedule,
-            pdg=float(pdg_scale) != 1.0,
-            pdg_strength=float(pdg_scale),
+            pdg=bool(pdg_enabled),
+            pdg_strength=float(pdg_strength),
             strength=float(strength),
             seed=int(seed),
         )
@@ -71,7 +89,12 @@ class CanterVAE:
             decoded = self.first_stage_model.decode(
                 samples.float(), height, width, inference_config=inference
             )
-            return decoded.movedim(1, -1)
+            return (
+                decoded.movedim(1, -1)
+                .add(1.0)
+                .div(2.0)
+                .clamp(0.0, 1.0)
+            )
         except torch.cuda.OutOfMemoryError as error:
             raise RuntimeError(
                 "DINAC uses global attention and cannot be tiled. Reduce image size or batch."
@@ -80,7 +103,7 @@ class CanterVAE:
     def decode(self, samples):
         return self._decode(
             samples, seed=0, steps=1, sampler="ddim",
-            schedule="linear", pdg_scale=1.0,
+            schedule="linear", pdg_enabled=False, pdg_strength=2.0,
         )
 
     def decode_advanced(self, samples, **settings):
@@ -93,25 +116,37 @@ class CanterVAE:
 
 def load_dinac(state):
     ignored = {key: state.pop(key) for key in tuple(state) if key.startswith(IGNORED_PREFIX)}
+    unsupported = {value.dtype for value in state.values()} - {
+        torch.bfloat16,
+        torch.float32,
+    }
+    if unsupported:
+        raise TypeError(
+            f"DINAC supports BF16/FP32 weights, found {sorted(map(str, unsupported))}"
+        )
     with torch.device("meta"):
         model = DinacAE(DINAC_CONFIG)
     del model.dino_token_alignment_head
-    expected = model.state_dict()
-    missing = sorted(set(expected) - set(state))
-    unexpected = sorted(set(state) - set(expected))
+    checkpoint_shapes = {key: tuple(value.shape) for key, value in state.items()}
+    try:
+        incompatible = model.load_state_dict(state, strict=False, assign=True)
+    except RuntimeError as error:
+        raise ValueError(
+            "Not a compatible DINAC-AE-D2 checkpoint: tensor shape mismatch"
+        ) from error
+    missing = sorted(incompatible.missing_keys)
+    unexpected = sorted(incompatible.unexpected_keys)
+    loaded = model.state_dict()
     mismatched = sorted(
-        key for key in set(expected) & set(state)
-        if tuple(expected[key].shape) != tuple(state[key].shape)
+        key
+        for key in set(loaded) & set(checkpoint_shapes)
+        if tuple(loaded[key].shape) != checkpoint_shapes[key]
     )
     if missing or unexpected or mismatched:
         raise ValueError(
             "Not a complete DINAC-AE-D2 checkpoint: "
             f"missing={missing[:8]}, unexpected={unexpected[:8]}, shape={mismatched[:8]}"
         )
-    unsupported = {value.dtype for value in state.values()} - {torch.bfloat16, torch.float32}
-    if unsupported:
-        raise TypeError(f"DINAC supports BF16/FP32 weights, found {sorted(map(str, unsupported))}")
-    model.load_state_dict(state, strict=True, assign=True)
     model._canter_intentionally_ignored_keys = tuple(sorted(ignored))
     patcher = comfy.model_patcher.CoreModelPatcher(
         model, mm.vae_device(), mm.vae_offload_device()

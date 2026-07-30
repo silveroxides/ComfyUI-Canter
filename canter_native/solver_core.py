@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
@@ -37,19 +38,53 @@ class VelocityFunction(Protocol):
         ...
 
 
-class SolverProgress(Protocol):
-    """Callback receiving completed and total solver-update counts."""
+@dataclass(frozen=True)
+class SolverProgressEvent:
+    """State exposed after one completed solver interval."""
 
-    def __call__(self, completed: int, total: int) -> None:
+    state: Tensor
+    denoised: Tensor
+    time: Tensor
+    interval_index: int
+    completed: int
+    total: int
+
+
+class SolverProgress(Protocol):
+    """Callback receiving the current solver state and evaluation."""
+
+    def __call__(self, event: SolverProgressEvent) -> None:
         """Report progress after one completed state update."""
 
         ...
 
 
-def _ignore_progress(completed: int, total: int) -> None:
+def _ignore_progress(event: SolverProgressEvent) -> None:
     """Discard solver progress for non-interactive inference."""
 
-    del completed, total
+    del event
+
+
+def _progress_event(
+    *,
+    state: Tensor,
+    velocity: Tensor,
+    time: Tensor,
+    interval_index: int,
+    total: int,
+) -> SolverProgressEvent:
+    """Build one progress event without another model evaluation."""
+
+    time_view = time.view((int(time.shape[0]),) + (1,) * (state.dim() - 1))
+    denoised = state - time_view.to(state) * velocity.to(state)
+    return SolverProgressEvent(
+        state=state,
+        denoised=denoised,
+        time=time,
+        interval_index=interval_index,
+        completed=interval_index + 1,
+        total=total,
+    )
 
 
 def _time_batch(time: Tensor, batch: int, device: torch.device) -> Tensor:
@@ -88,8 +123,17 @@ def _euler(
     for index in range(intervals):
         time = _time_batch(schedule[index], batch, state.device)
         step = schedule[index + 1] - schedule[index]
-        state = state + step * velocity(state, time, index)
-        progress(index + 1, intervals)
+        predicted = velocity(state, time, index)
+        denoised = state - time.view(batch, 1, 1, 1).to(state) * predicted.to(state)
+        state = state + step * predicted
+        progress(SolverProgressEvent(
+            state=state,
+            denoised=denoised,
+            time=time,
+            interval_index=index,
+            completed=index + 1,
+            total=intervals,
+        ))
     return state
 
 
@@ -126,10 +170,18 @@ def _euler_maruyama(
             dtype=torch.float32,
         )
         predicted = velocity(state, time, index).float()
+        denoised = state - time.view(batch, 1, 1, 1).to(state) * predicted.to(state)
         terminal = index == intervals - 1 and next_value == 0.0
         if terminal:
             state = state - time_value * predicted
-            progress(index + 1, intervals)
+            progress(SolverProgressEvent(
+                state=state,
+                denoised=denoised,
+                time=time,
+                interval_index=index,
+                completed=index + 1,
+                total=intervals,
+            ))
             continue
         drift = predicted - time.view((batch, 1, 1, 1)) * _score(
             state,
@@ -145,7 +197,14 @@ def _euler_maruyama(
         diffusion = 2.0 * time_value
         noise_scale = float(multiplier) * math.sqrt(diffusion) * math.sqrt(abs(step))
         state = state + step * drift + noise_scale * noise
-        progress(index + 1, intervals)
+        progress(SolverProgressEvent(
+            state=state,
+            denoised=denoised,
+            time=time,
+            interval_index=index,
+            completed=index + 1,
+            total=intervals,
+        ))
     return state
 
 
@@ -230,7 +289,14 @@ def _dpmpp_2m(
             )
         previous_denoised = denoised
         previous_lambda = lambdas[index]
-        progress(index + 1, intervals)
+        progress(SolverProgressEvent(
+            state=state,
+            denoised=denoised,
+            time=_time_batch(current_time, batch, state.device),
+            interval_index=index,
+            completed=index + 1,
+            total=intervals,
+        ))
     return state
 
 
@@ -383,7 +449,14 @@ def _er_sde(
                 noise_multiplier=float(noise_multiplier),
             )
         old_denoised = denoised
-        progress(index + 1, intervals)
+        progress(SolverProgressEvent(
+            state=state,
+            denoised=denoised,
+            time=_time_batch(current_time, batch, state.device),
+            interval_index=index,
+            completed=index + 1,
+            total=intervals,
+        ))
     return state
 
 
@@ -424,7 +497,14 @@ def _abm2(
         _time_batch(schedule[1], batch, state.device),
         1,
     )
-    progress(1, intervals)
+    current_time = _time_batch(schedule[1], batch, state.device)
+    progress(_progress_event(
+        state=state,
+        velocity=current_velocity,
+        time=current_time,
+        interval_index=0,
+        total=intervals,
+    ))
     for index in range(1, intervals):
         previous_step = schedule[index] - schedule[index - 1]
         current_step = schedule[index + 1] - schedule[index]
@@ -450,7 +530,14 @@ def _abm2(
             _time_batch(schedule[index + 1], batch, state.device),
             index + 1,
         )
-        progress(index + 1, intervals)
+        current_time = _time_batch(schedule[index + 1], batch, state.device)
+        progress(_progress_event(
+            state=state,
+            velocity=current_velocity,
+            time=current_time,
+            interval_index=index,
+            total=intervals,
+        ))
     return state
 
 

@@ -20,6 +20,19 @@ def inside(step: int, start: int, stop: int) -> bool:
     return start <= step <= stop
 
 
+def resolve_window(start: int, stop: int, steps: int, name: str) -> tuple[int, int]:
+    if steps < 1:
+        raise ValueError("Canter sampling requires at least one step")
+    resolved_stop = steps - 1 if stop == -1 else stop
+    if start < 0 or resolved_stop < 0:
+        raise ValueError(f"{name} guidance window indices must be non-negative")
+    if start > resolved_stop:
+        raise ValueError(f"{name} guidance start must not exceed stop")
+    if resolved_stop >= steps:
+        raise ValueError(f"{name} guidance stop must be less than the sampler steps")
+    return start, resolved_stop
+
+
 def pdg_scales(curve: str, noisy: float, clean: float, power: float, steps: int):
     if steps < 1 or power <= 0:
         raise ValueError("steps and PDG power must be positive")

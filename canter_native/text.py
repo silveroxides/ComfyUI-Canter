@@ -83,7 +83,8 @@ class CanterTextBackbone(torch.nn.Module):
         self.layers = torch.nn.ModuleList(SmolLayer(operations) for _ in range(24))
 
     def forward(self, ids, mask, transformer_options=None):
-        x = self.embed_tokens(ids)
+        compute_dtype = self.layers[0].self_attn.q_proj.weight.dtype
+        x = self.embed_tokens(ids).to(dtype=compute_dtype)
         taps = []
         for index, layer in enumerate(self.layers, 1):
             x = layer(x, mask, transformer_options)
@@ -129,6 +130,9 @@ class CanterCLIP:
         texts = list(tokens)
         mm.load_models_gpu([self.patcher])
         device = self.patcher.load_device
+        transformer_options = self.patcher.model_options.get(
+            "transformer_options", {}
+        )
         if all(not text.strip() for text in texts):
             mask = torch.ones((len(texts), 1), device=device, dtype=torch.bool)
             compute_dtype = self.cond_stage_model.compute_dtype
@@ -137,7 +141,9 @@ class CanterCLIP:
                 dtype=compute_dtype,
                 enabled=compute_dtype is torch.bfloat16,
             ):
-                token = self.cond_stage_model.refine_unconditional(len(texts), device, mask)
+                token = self.cond_stage_model.refine_unconditional(
+                    len(texts), device, mask, transformer_options
+                )
             return [[token, {"attention_mask": mask}]]
         ids, mask = self.tokenizer_impl.batch(texts)
         compute_dtype = self.cond_stage_model.compute_dtype
@@ -146,8 +152,12 @@ class CanterCLIP:
             dtype=compute_dtype,
             enabled=compute_dtype is torch.bfloat16,
         ):
-            taps = self.cond_stage_model.backbone(ids.to(device), mask.to(device))
-            refined = self.cond_stage_model.refine(taps, mask.to(device))
+            taps = self.cond_stage_model.backbone(
+                ids.to(device), mask.to(device), transformer_options
+            )
+            refined = self.cond_stage_model.refine(
+                taps, mask.to(device), transformer_options
+            )
         return [[refined, {"attention_mask": mask.to(device)}]]
 
     def clone(self):
@@ -165,13 +175,15 @@ class TextBundle(torch.nn.Module):
     def compute_dtype(self):
         return self.backbone.layers[0].self_attn.q_proj.weight.dtype
 
-    def refine(self, taps, mask):
-        return self.refiner.project_text_features(taps[0], taps[1], taps[2], mask).tokens
+    def refine(self, taps, mask, transformer_options=None):
+        return self.refiner.project_text_features(
+            taps[0], taps[1], taps[2], mask, transformer_options
+        ).tokens
 
-    def refine_unconditional(self, batch, device, mask):
+    def refine_unconditional(self, batch, device, mask, transformer_options=None):
         tokens = self.unconditional_token.to(device).unsqueeze(0).expand(batch, -1, -1)
         for block in self.refiner.text_blocks:
-            tokens = block(tokens, mask, 1, 1)
+            tokens = block(tokens, mask, 1, 1, transformer_options)
         return tokens
 
 
@@ -184,7 +196,9 @@ class CanterTextRefiner(torch.nn.Module):
         self.text_blocks = denoiser.text_blocks
         self.unconditional_token = denoiser.unconditional_token
 
-    def project_text_features(self, low, middle, high, mask):
+    def project_text_features(
+        self, low, middle, high, mask, transformer_options=None
+    ):
         from .modeling_canter import PreparedText
         tokens = (
             self.text_projection_low(low).float()
@@ -193,5 +207,11 @@ class CanterTextRefiner(torch.nn.Module):
         )
         lengths = mask.sum(1)
         for block in self.text_blocks:
-            tokens = block(tokens, mask, int(lengths.min()), int(lengths.max()))
+            tokens = block(
+                tokens,
+                mask,
+                int(lengths.min()),
+                int(lengths.max()),
+                transformer_options,
+            )
         return PreparedText(tokens, mask, int(lengths.min()), int(lengths.max()))

@@ -51,8 +51,13 @@ class SinusoidalTimeEmbeddingMLP(nn.Module):
         hidden_mult: float = 1.0,
         time_scale: float = 1000.0,
         max_period: float = 10000.0,
+        operations=None,
     ) -> None:
         super().__init__()
+        if operations is None:
+            import comfy.ops
+
+            operations = comfy.ops.manual_cast
         self.dim = int(dim)
         self.freq_dim = int(freq_dim)
         self.time_scale = float(time_scale)
@@ -62,9 +67,9 @@ class SinusoidalTimeEmbeddingMLP(nn.Module):
         freqs = _log_spaced_frequencies(self.freq_dim // 2, self.max_period)
         self.register_buffer("freqs", freqs, persistent=True)
 
-        self.proj_in = nn.Linear(self.freq_dim, hidden_dim)
+        self.proj_in = operations.Linear(self.freq_dim, hidden_dim)
         self.act = nn.SiLU()
-        self.proj_out = nn.Linear(hidden_dim, self.dim)
+        self.proj_out = operations.Linear(hidden_dim, self.dim)
 
     def forward(self, t: Tensor) -> Tensor:
         freqs: Tensor = self.freqs  # type: ignore[assignment]

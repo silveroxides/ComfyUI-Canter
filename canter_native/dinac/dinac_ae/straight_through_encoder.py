@@ -17,6 +17,7 @@ class StraightThroughEncoder(nn.Module):
         in_channels: int,
         patch: int,
         out_channels: int,
+        operations,
     ) -> None:
         super().__init__()
         if in_channels <= 0:
@@ -28,7 +29,7 @@ class StraightThroughEncoder(nn.Module):
         self.in_channels: Final[int] = int(in_channels)
         self.patch: Final[int] = int(patch)
         self._output_channels: Final[int] = int(out_channels)
-        self.proj = nn.Conv2d(
+        self.proj = operations.Conv2d(
             self.in_channels,
             self._output_channels,
             kernel_size=self.patch,

@@ -165,10 +165,10 @@ class RMSNorm(nn.Module):
 class GELUMLP(nn.Module):
     """Bias-free GELU feed-forward network."""
 
-    def __init__(self, width: int, hidden_width: int) -> None:
+    def __init__(self, width: int, hidden_width: int, operations) -> None:
         super().__init__()
-        self.up = nn.Linear(width, hidden_width, bias=False)
-        self.down = nn.Linear(hidden_width, width, bias=False)
+        self.up = operations.Linear(width, hidden_width, bias=False)
+        self.down = operations.Linear(hidden_width, width, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply the two feed-forward projections."""
@@ -179,10 +179,12 @@ class GELUMLP(nn.Module):
 class LowRankAdaLN(nn.Module):
     """Bias-free low-rank delta added to a shared AdaLN projection."""
 
-    def __init__(self, input_width: int, output_width: int, rank: int) -> None:
+    def __init__(
+        self, input_width: int, output_width: int, rank: int, operations
+    ) -> None:
         super().__init__()
-        self.down = nn.Linear(input_width, rank, bias=False)
-        self.up = nn.Linear(rank, output_width, bias=False)
+        self.down = operations.Linear(input_width, rank, bias=False)
+        self.up = operations.Linear(rank, output_width, bias=False)
 
     def forward(self, activated_condition: Tensor) -> Tensor:
         """Project an already SiLU-activated conditioning vector."""
@@ -193,9 +195,9 @@ class LowRankAdaLN(nn.Module):
 class SharedAdaLN(nn.Module):
     """Shared SiLU-linear AdaLN base used by all image blocks."""
 
-    def __init__(self, width: int, output_width: int) -> None:
+    def __init__(self, width: int, output_width: int, operations) -> None:
         super().__init__()
-        self.proj = nn.Linear(width, output_width, bias=True)
+        self.proj = operations.Linear(width, output_width, bias=True)
 
     def activated(self, condition: Tensor) -> Tensor:
         """Return the common SiLU activation used by base and deltas."""
@@ -240,13 +242,13 @@ def gated_residual(gate: Tensor, value: Tensor) -> Tensor:
 class ImageSelfAttention(nn.Module):
     """Canter image self-attention with QK norm and axial 2D RoPE."""
 
-    def __init__(self, width: int, heads: int) -> None:
+    def __init__(self, width: int, heads: int, operations) -> None:
         super().__init__()
         self.width = int(width)
         self.heads = int(heads)
         self.head_dim = self.width // self.heads
-        self.qkv = nn.Linear(self.width, 3 * self.width, bias=False)
-        self.proj_out = nn.Linear(self.width, self.width, bias=False)
+        self.qkv = operations.Linear(self.width, 3 * self.width, bias=False)
+        self.proj_out = operations.Linear(self.width, self.width, bias=False)
         self.q_norm = RMSNorm(self.head_dim)
         self.k_norm = RMSNorm(self.head_dim)
         self.attention_query_scale = 1.0
@@ -256,6 +258,7 @@ class ImageSelfAttention(nn.Module):
         tokens: Tensor,
         *,
         rope_sincos: tuple[Tensor, Tensor],
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Apply dense scaled-dot-product self-attention."""
 
@@ -295,7 +298,8 @@ class ImageSelfAttention(nn.Module):
         k = k_rope.to(dtype=k_dtype)
         q = q * float(self.attention_query_scale)
         attended = optimized_attention(
-            q, k, v, self.heads, skip_reshape=True, skip_output_reshape=True
+            q, k, v, self.heads, skip_reshape=True, skip_output_reshape=True,
+            transformer_options=transformer_options or {},
         )
         attended = attended.transpose(1, 2).contiguous().view(batch, length, self.width)
         return self.proj_out(attended)
@@ -304,14 +308,14 @@ class ImageSelfAttention(nn.Module):
 class DiTBlock(nn.Module):
     """One frozen Canter image transformer block."""
 
-    def __init__(self, width: int, heads: int, mlp_ratio: int) -> None:
+    def __init__(self, width: int, heads: int, mlp_ratio: int, operations) -> None:
         super().__init__()
         self.attn_norm1 = RMSNorm(width)
         self.attn_norm2 = RMSNorm(width)
         self.mlp_norm1 = RMSNorm(width)
         self.mlp_norm2 = RMSNorm(width)
-        self.mlp = GELUMLP(width, width * mlp_ratio)
-        self.attention = ImageSelfAttention(width, heads)
+        self.mlp = GELUMLP(width, width * mlp_ratio, operations)
+        self.attention = ImageSelfAttention(width, heads, operations)
         self._implementation: Callable[..., Tensor] = self._forward_impl
         self._compiled = False
 
@@ -324,6 +328,7 @@ class DiTBlock(nn.Module):
         *,
         rope_sincos: tuple[Tensor, Tensor],
         generator: torch.Generator | None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Dispatch to the eager or setup-time compiled implementation."""
 
@@ -334,6 +339,7 @@ class DiTBlock(nn.Module):
             modulation,
             rope_sincos=rope_sincos,
             generator=generator,
+            transformer_options=transformer_options,
         )
 
     def _forward_impl(
@@ -345,6 +351,7 @@ class DiTBlock(nn.Module):
         *,
         rope_sincos: tuple[Tensor, Tensor],
         generator: torch.Generator | None,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Apply attention and MLP residuals with packed AdaLN modulation."""
 
@@ -354,6 +361,7 @@ class DiTBlock(nn.Module):
         y = self.attention(
             attn_in,
             rope_sincos=rope_sincos,
+            transformer_options=transformer_options,
         )
         attn_out = self.attn_norm2(y)
         tokens = tokens + gated_residual(gate_a, attn_out)
@@ -387,8 +395,8 @@ class DiTBlock(nn.Module):
 class TransitionDiTBlock(DiTBlock):
     """Always-on boundary DiT block with a learned modulation gate."""
 
-    def __init__(self, width: int, heads: int, mlp_ratio: int) -> None:
-        super().__init__(width, heads, mlp_ratio)
+    def __init__(self, width: int, heads: int, mlp_ratio: int, operations) -> None:
+        super().__init__(width, heads, mlp_ratio, operations)
         self.adaln_modulation_scale = nn.Parameter(torch.zeros(()))
 
     def _apply(
@@ -448,18 +456,20 @@ def text_rope(
 class TextSelfAttention(nn.Module):
     """Text refinement self-attention with QK norm and 1D RoPE."""
 
-    def __init__(self, width: int, heads: int, theta: float) -> None:
+    def __init__(self, width: int, heads: int, theta: float, operations) -> None:
         super().__init__()
         self.width = int(width)
         self.heads = int(heads)
         self.head_dim = self.width // self.heads
         self.theta = float(theta)
-        self.qkv = nn.Linear(width, 3 * width, bias=False)
-        self.proj_out = nn.Linear(width, width, bias=False)
+        self.qkv = operations.Linear(width, 3 * width, bias=False)
+        self.proj_out = operations.Linear(width, width, bias=False)
         self.q_norm = RMSNorm(self.head_dim)
         self.k_norm = RMSNorm(self.head_dim)
 
-    def dense(self, tokens: Tensor, mask: Tensor) -> Tensor:
+    def dense(
+        self, tokens: Tensor, mask: Tensor, transformer_options: dict | None = None
+    ) -> Tensor:
         """Apply dense padded self-attention."""
 
         batch, length, _ = tokens.shape
@@ -491,6 +501,7 @@ class TextSelfAttention(nn.Module):
         attended = optimized_attention(
             q, k, v, self.heads, mask=attention_mask,
             skip_reshape=True, skip_output_reshape=True,
+            transformer_options=transformer_options or {},
         )
         attended = attended.transpose(1, 2).contiguous().view(batch, length, self.width)
         return self.proj_out(attended)
@@ -564,12 +575,13 @@ class TextTransformerBlock(nn.Module):
         mlp_ratio: int,
         theta: float,
         backend: TextAttentionBackend,
+        operations,
     ) -> None:
         super().__init__()
         self.attn_norm = RMSNorm(width)
         self.mlp_norm = RMSNorm(width)
-        self.self_attn = TextSelfAttention(width, heads, theta)
-        self.mlp = GELUMLP(width, width * mlp_ratio)
+        self.self_attn = TextSelfAttention(width, heads, theta, operations)
+        self.mlp = GELUMLP(width, width * mlp_ratio, operations)
         self._dense_implementation: Callable[..., Tensor] = self._forward_dense
         self._jagged_implementation: Callable[..., Tensor] = self._forward_jagged
         self._jagged_singleton_implementation: Callable[..., Tensor] = (
@@ -586,10 +598,13 @@ class TextTransformerBlock(nn.Module):
         mask: Tensor,
         min_length: int,
         max_length: int,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Dispatch to the eager or setup-time compiled implementation."""
 
-        return self._implementation(tokens, mask, min_length, max_length)
+        return self._implementation(
+            tokens, mask, min_length, max_length, transformer_options
+        )
 
     def _forward_dense(
         self,
@@ -597,11 +612,14 @@ class TextTransformerBlock(nn.Module):
         mask: Tensor,
         min_length: int,
         max_length: int,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Refine dense padded text tokens."""
 
         del min_length, max_length
-        tokens = tokens + self.self_attn.dense(self.attn_norm(tokens), mask)
+        tokens = tokens + self.self_attn.dense(
+            self.attn_norm(tokens), mask, transformer_options
+        )
         return tokens + self.mlp(self.mlp_norm(tokens))
 
     def _forward_jagged(
@@ -610,10 +628,11 @@ class TextTransformerBlock(nn.Module):
         mask: Tensor,
         min_length: int,
         max_length: int,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Refine packed text with FlashAttention."""
 
-        del mask
+        del mask, transformer_options
         normalized = self.attn_norm(tokens)
         rope = _jagged_rope(
             normalized,
@@ -710,6 +729,7 @@ class ImageTextCrossAttention(nn.Module):
         heads: int,
         head_dim: int,
         backend: TextAttentionBackend,
+        operations,
     ) -> None:
         super().__init__()
         self.image_width = int(image_width)
@@ -718,9 +738,15 @@ class ImageTextCrossAttention(nn.Module):
         self.attention_width = self.heads * self.head_dim
         self.image_norm = RMSNorm(image_width)
         self.text_norm = RMSNorm(text_width)
-        self.q_proj = nn.Linear(image_width, self.attention_width, bias=False)
-        self.kv_proj = nn.Linear(text_width, 2 * self.attention_width, bias=False)
-        self.out_proj = nn.Linear(self.attention_width, image_width, bias=False)
+        self.q_proj = operations.Linear(
+            image_width, self.attention_width, bias=False
+        )
+        self.kv_proj = operations.Linear(
+            text_width, 2 * self.attention_width, bias=False
+        )
+        self.out_proj = operations.Linear(
+            self.attention_width, image_width, bias=False
+        )
         self.q_norm_heads = RMSNorm(head_dim)
         self.k_norm_heads = RMSNorm(head_dim)
         self.attention_query_scale = 1.0
@@ -739,6 +765,7 @@ class ImageTextCrossAttention(nn.Module):
         text_min_length: int,
         text_max_length: int,
         modulation: Tensor,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Dispatch to the eager or setup-time compiled implementation."""
 
@@ -749,6 +776,7 @@ class ImageTextCrossAttention(nn.Module):
             text_min_length,
             text_max_length,
             modulation,
+            transformer_options,
         )
 
     def _forward_dense(  # noqa: PLR0917 - frozen cross-attention tensor interface
@@ -759,6 +787,7 @@ class ImageTextCrossAttention(nn.Module):
         text_min_length: int,
         text_max_length: int,
         modulation: Tensor,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Apply dense cross-attention with an explicit padding mask."""
 
@@ -779,6 +808,7 @@ class ImageTextCrossAttention(nn.Module):
         attended = optimized_attention(
             q, k, v, self.heads, mask=text_mask[:, None, None, :],
             skip_reshape=True, skip_output_reshape=True,
+            transformer_options=transformer_options or {},
         )
         attended = (
             attended.transpose(1, 2)
@@ -796,10 +826,11 @@ class ImageTextCrossAttention(nn.Module):
         text_min_length: int,
         text_max_length: int,
         modulation: Tensor,
+        transformer_options: dict | None = None,
     ) -> Tensor:
         """Apply NestedTensor SDPA cross-attention over packed text."""
 
-        del text_mask
+        del text_mask, transformer_options
         scale, gate = modulation.chunk(2, dim=-1)
         query_input = apply_scale(self.image_norm(image), scale)
         batch, image_length, _ = image.shape
