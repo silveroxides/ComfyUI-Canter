@@ -10,16 +10,6 @@ Place the v0001 denoiser in `models/diffusion_models`, the bundled 24-layer
 SmolLM2 subset in `models/text_encoders`, and DINAC-AE-D2 in `models/vae`.
 The loaders validate checkpoint family, tensor count, shape, and storage dtype.
 
-An existing local snapshot can instead be registered without copying:
-
-```yaml
-canter:
-  base_path: "<absolute-path-to-canter-snapshot>"
-  diffusion_models: .
-  text_encoders: text_encoder
-  vae: ../dinac-ae-d2
-```
-
 ## Workflow
 
 Connect `CanterModelLoader` to the stock **CLIP Text Encode** node. Feed the
