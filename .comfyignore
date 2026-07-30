@@ -1,0 +1,5 @@
+tests/
+.pytest-tmp/
+__pycache__/
+*.pyc
+AGENTS.md

@@ -1,0 +1,21 @@
+{
+  "last_node_id": 10,
+  "last_link_id": 13,
+  "nodes": [
+    {"id": 1, "type": "CanterModelLoader"},
+    {"id": 2, "type": "CLIPTextEncode"},
+    {"id": 3, "type": "CLIPTextEncode"},
+    {"id": 4, "type": "CanterGuider"},
+    {"id": 5, "type": "CanterSamplerScheduler"},
+    {"id": 6, "type": "RandomNoise"},
+    {"id": 7, "type": "EmptyCanterLatent"},
+    {"id": 8, "type": "SamplerCustomAdvanced"},
+    {"id": 9, "type": "CanterVAELoader"},
+    {"id": 10, "type": "VAEDecode"}
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {"description": "Canonical modular Canter workflow; select local checkpoints in both loaders."},
+  "version": 0.4
+}

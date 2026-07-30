@@ -1,0 +1,46 @@
+# ComfyUI-Canter
+
+Native ComfyUI integration for Canter v0001 and DINAC-AE-D2. It does not use
+`CanterPipeline`, Diffusers, Transformers model wrappers, downloads, or ComfyUI
+core patches.
+
+## Models
+
+Place the v0001 denoiser in `models/diffusion_models`, the bundled 24-layer
+SmolLM2 subset in `models/text_encoders`, and DINAC-AE-D2 in `models/vae`.
+The loaders validate checkpoint family, tensor count, shape, and storage dtype.
+
+An existing local snapshot can instead be registered without copying:
+
+```yaml
+canter:
+  base_path: D:/models/data-archetype/canter
+  diffusion_models: .
+  text_encoders: text_encoder
+  vae: ../dinac-ae-d2
+```
+
+## Workflow
+
+Connect `CanterModelLoader` to the stock **CLIP Text Encode** node. Feed the
+conditioning and model into `CanterGuider`; connect the paired outputs from
+`CanterSamplerScheduler` and the guider to **SamplerCustomAdvanced**. Start
+with `EmptyCanterLatent`. Decode with the stock **VAEDecode** node for the
+published one-step defaults or `CanterVAEDecodeAdvanced` for multi-step DINAC
+decoding.
+
+Only `CanterSamplerScheduler` implements the raw-velocity contract. Generic
+ComfyUI samplers interpret the model output differently and are unsupported.
+DINAC uses global transformer attention; tiled encode/decode is deliberately
+rejected because it is not numerically equivalent.
+
+Production execution targets CUDA BF16 with published FP32 parameter/math
+islands. FP32 is retained for tests and compatible checkpoints. No real model
+inference or image-parity claim is made by this implementation.
+
+## Licensing
+
+Canter-derived portions are distributed under ModelGo
+Attribution-ShareAlike 2.0; see `LICENSE` and `NOTICE`. SmolLM2 subset,
+tokenizer assets, and DINAC-derived portions retain Apache-2.0 attribution;
+see `LICENSE-APACHE-2.0` and `ATTRIBUTION.md`.

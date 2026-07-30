@@ -1,0 +1,26 @@
+Canter
+Copyright 2026 Data Archetype
+
+Modified for native ComfyUI integration on 2026-07-30.
+
+Canter's original model weights, architecture, model-specific code, and
+documentation are licensed under the ModelGo Attribution-ShareAlike License
+2.0 (MG-BY-SA-2.0). See LICENSE.
+
+Required attribution notice:
+
+  This project uses Canter by Data Archetype.
+  https://huggingface.co/data-archetype/canter
+
+Distributions of Canter, Derivative Materials, or Extracted Models must retain
+this notice.
+
+Third-party materials are not relicensed under MG-BY-SA-2.0:
+
+- The bundled SmolLM2 tokenizer, token embedding, and first 24 decoder layers
+  are derived from HuggingFaceTB/SmolLM2-360M and remain available under
+  Apache License 2.0. See LICENSE-APACHE-2.0 and ATTRIBUTION.md.
+- DINAC-AE-D2 architecture and sampler code is derived from
+  data-archetype/dinac_ae_d2 revision
+  6fb2056b09896d4148fe34d44777b5a76d9aedb2 and remains under Apache
+  License 2.0. Its weights remain separately distributed.

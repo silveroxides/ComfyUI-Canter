@@ -1,0 +1,16 @@
+[project]
+name = "comfyui-canter"
+version = "0.1.0"
+description = "Native ComfyUI nodes for Canter v0001 and DINAC-AE-D2"
+requires-python = ">=3.11"
+license = { text = "ModelGo Attribution-ShareAlike 2.0" }
+
+[project.urls]
+Repository = "https://github.com/silveroxides/ComfyUI-Canter"
+Issues = "https://github.com/silveroxides/ComfyUI-Canter/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
