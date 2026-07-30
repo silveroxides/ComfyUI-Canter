@@ -6,9 +6,21 @@ core patches.
 
 ## Models
 
-Place the v0001 denoiser in `models/diffusion_models`, the bundled 24-layer
-SmolLM2 subset in `models/text_encoders`, and DINAC-AE-D2 in `models/vae`.
-The loaders validate checkpoint family, tensor count, shape, and storage dtype.
+Download these three official safetensors files. Rename them when saving so
+the two upstream files named `model-00001-of-00001.safetensors` remain
+unambiguous in ComfyUI.
+
+| Model | Official file | Save as |
+|---|---|---|
+| Canter v0001 denoiser | [`model-00001-of-00001.safetensors`](https://huggingface.co/data-archetype/canter/blob/v0001/model-00001-of-00001.safetensors) | `ComfyUI/models/diffusion_models/canter_v0001.safetensors` |
+| Bundled SmolLM2 subset | [`text_encoder/model-00001-of-00001.safetensors`](https://huggingface.co/data-archetype/canter/blob/v0001/text_encoder/model-00001-of-00001.safetensors) | `ComfyUI/models/text_encoders/canter_smol_lm2_360m.safetensors` |
+| DINAC-AE-D2 | [`model.safetensors`](https://huggingface.co/data-archetype/dinac_ae_d2/blob/main/model.safetensors) | `ComfyUI/models/vae/dinac_ae_d2.safetensors` |
+
+Restart ComfyUI or refresh its model list after adding the files. Select the
+renamed files in `CanterModelLoader` and `CanterVAELoader`. No config files,
+model indexes, tokenizer downloads, copied snapshots, or custom model paths
+are required. The loaders validate checkpoint family, tensor count, shapes,
+and storage dtype.
 
 ## Workflow
 

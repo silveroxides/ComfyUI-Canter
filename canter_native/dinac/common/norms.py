@@ -182,11 +182,11 @@ def global_rms_norm(x: Tensor, eps: float = 1e-6) -> Tensor:
 
 
 class GlobalRMSNorm(nn.Module):
-    """RMSNorm across all dims except batch — sphere projection for NCHW tensors.
+    """RMSNorm across all dimensions except the batch dimension.
 
     Unlike :class:`ChannelWiseRMSNorm` (which normalizes per spatial position
     over channels), this normalizes the *entire* feature volume jointly,
-    projecting each sample onto a hypersphere.  No learnable parameters.
+    projecting each sample onto a hypersphere. No learnable parameters.
     """
 
     def __init__(self, eps: float = 1e-6) -> None:
