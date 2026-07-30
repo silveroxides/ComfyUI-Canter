@@ -14,7 +14,7 @@ An existing local snapshot can instead be registered without copying:
 
 ```yaml
 canter:
-  base_path: D:/models/data-archetype/canter
+  base_path: "<absolute-path-to-canter-snapshot>"
   diffusion_models: .
   text_encoders: text_encoder
   vae: ../dinac-ae-d2
